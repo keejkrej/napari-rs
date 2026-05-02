@@ -2,6 +2,9 @@ use std::error::Error;
 use std::fmt;
 
 use crate::utils::misc::reorder_after_dim_reduction;
+use crate::utils::transforms::affine::Affine;
+use crate::utils::transforms::transform_utils::{diagonal, embed_in_identity_matrix, mat_mul};
+use crate::utils::transforms::units::Unit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SliceInputError {
@@ -220,6 +223,61 @@ impl SliceInput {
             .into_iter()
             .all(|axis| mapped_subspace[axis].abs() < 1e-8))
     }
+
+    pub fn is_orthogonal(&self, world_to_data: &Affine) -> Result<bool, SliceInputError> {
+        let linear_matrix = embed_in_identity_matrix(&world_to_data.linear_matrix, self.ndim())
+            .map_err(|_| SliceInputError::InvalidLinearMatrix {
+                rows: world_to_data.linear_matrix.len(),
+                expected: self.ndim(),
+            })?;
+        self.is_orthogonal_with_linear_matrix(&linear_matrix)
+    }
+
+    pub fn data_slice(&self, world_to_data: &Affine) -> ThickNdSlice<f64> {
+        let not_displayed = self.not_displayed();
+        let mut full_data_slice = vec![vec![f64::NAN; self.ndim()]; 3];
+        if not_displayed.is_empty() {
+            return ThickNdSlice::from_rows(&full_data_slice).expect("constructed with three rows");
+        }
+
+        let slice_world_to_data = world_to_data.set_slice(&not_displayed);
+        let mut data_slice = slice_world_to_data
+            .transform_points(&self.world_slice.select_axes(&not_displayed).as_rows());
+        for row in data_slice.iter_mut().skip(1) {
+            for (value, translate) in row.iter_mut().zip(&slice_world_to_data.translate) {
+                *value -= translate;
+            }
+        }
+
+        for (slice_axis, &data_axis) in not_displayed.iter().enumerate() {
+            for row in 0..3 {
+                let value = data_slice[row][slice_axis];
+                full_data_slice[row][data_axis] = if value.is_nan() { 0.0 } else { value };
+            }
+        }
+        ThickNdSlice::from_rows(&full_data_slice).expect("constructed with three rows")
+    }
+}
+
+pub fn apply_units_to_transform(data_to_world: &Affine, world_units: Option<&[Unit]>) -> Affine {
+    let Some(world_units) = world_units else {
+        return data_to_world.clone();
+    };
+    if world_units.len() < data_to_world.units.len() {
+        return data_to_world.clone();
+    }
+
+    let start = world_units.len() - data_to_world.units.len();
+    let scale = world_units[start..]
+        .iter()
+        .zip(&data_to_world.units)
+        .map(|(world_unit, layer_unit)| world_unit.base_scale() / layer_unit.base_scale())
+        .collect::<Vec<_>>();
+    Affine::from_linear_matrix(
+        mat_mul(&data_to_world.linear_matrix, &diagonal(&scale)),
+        data_to_world.translate.clone(),
+        None,
+    )
 }
 
 fn normalize_slice_field<T: Clone + Default>(

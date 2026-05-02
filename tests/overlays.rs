@@ -1,7 +1,8 @@
 use napari_rs::components::overlays::base::{CanvasOverlay, Overlay, SceneOverlay};
 use napari_rs::components::overlays::{
-    AxesOverlay, BrushCircleOverlay, CurrentSliceOverlay, LayerNameOverlay, ScaleBarOverlay,
-    TextOverlay, ZoomOverlay,
+    AxesOverlay, BoundingBoxOverlay, BrushCircleOverlay, ColorBarOverlay, CurrentSliceOverlay,
+    LabelsPolygonOverlay, LayerNameOverlay, ScaleBarOverlay, TextOverlay, WelcomeOverlay,
+    ZoomOverlay,
 };
 use napari_rs::components::tooltip::Tooltip;
 use napari_rs::components::viewer_constants::CanvasPosition;
@@ -46,6 +47,28 @@ fn brush_circle_defaults_match_python_model() {
     assert_eq!(brush_circle.size, 10);
     assert_eq!(brush_circle.position, (0, 0));
     assert!(!brush_circle.position_is_frozen);
+}
+
+#[test]
+fn bounding_box_defaults_match_python_model() {
+    let bounding_box = BoundingBoxOverlay::default();
+    assert!(bounding_box.lines);
+    assert_eq!(bounding_box.line_thickness, 1.0);
+    assert_eq!(bounding_box.line_color, [1.0, 0.0, 0.0, 1.0]);
+    assert!(bounding_box.points);
+    assert_eq!(bounding_box.point_size, 5.0);
+    assert_eq!(bounding_box.point_color, [0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(bounding_box.base.overlay.blending, Blending::Translucent);
+}
+
+#[test]
+fn colorbar_defaults_match_python_model() {
+    let colorbar = ColorBarOverlay::default();
+    assert_eq!(colorbar.color, None);
+    assert_eq!(colorbar.size, (25.0, 150.0));
+    assert_eq!(colorbar.tick_length, 5.0);
+    assert_eq!(colorbar.font_size, 10.0);
+    assert_eq!(colorbar.base.position, CanvasPosition::TopRight);
 }
 
 #[test]
@@ -112,4 +135,39 @@ fn blending_strings_match_python_string_enum_values() {
     assert_eq!(Blending::Opaque.to_string(), "opaque");
     assert_eq!(Blending::Multiplicative.to_string(), "multiplicative");
     assert_eq!("OPAQUE".parse(), Ok(Blending::Opaque));
+}
+
+#[test]
+fn welcome_overlay_defaults_match_python_model() {
+    let welcome = WelcomeOverlay::default();
+    assert_eq!(welcome.position, None);
+    assert_eq!(welcome.overlay.order, Overlay::DEFAULT_ORDER + 10);
+    assert!(!welcome.gridded);
+    assert_eq!(welcome.version, "not-installed");
+    assert_eq!(welcome.shortcuts.len(), 4);
+    assert_eq!(welcome.tips.len(), 10);
+    assert!(
+        welcome
+            .shortcuts
+            .contains(&"napari.window.view.toggle_command_palette".to_owned())
+    );
+}
+
+#[test]
+fn labels_polygon_overlay_tracks_and_clears_pending_polygon() {
+    let mut overlay = LabelsPolygonOverlay::default();
+    assert!(!overlay.enabled);
+    assert!(!overlay.use_double_click_completion_radius);
+    assert_eq!(overlay.completion_radius, 20.0);
+
+    overlay.points = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+    assert_eq!(overlay.take_polygon_for_paint(), None);
+    assert!(overlay.points.is_empty());
+
+    overlay.points = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![1.0, 1.0]];
+    assert_eq!(
+        overlay.take_polygon_for_paint(),
+        Some(vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![1.0, 1.0]])
+    );
+    assert!(overlay.points.is_empty());
 }

@@ -4,6 +4,7 @@ pub type Matrix = Vec<Vec<f64>>;
 pub enum TransformUtilsError {
     InvalidMatrix,
     InvalidShear,
+    SingularMatrix,
     StrangeShearElementCount(usize),
 }
 
@@ -12,6 +13,7 @@ impl std::fmt::Display for TransformUtilsError {
         match self {
             Self::InvalidMatrix => formatter.write_str("improper transform matrix"),
             Self::InvalidShear => formatter.write_str("invalid shear"),
+            Self::SingularMatrix => formatter.write_str("matrix is singular"),
             Self::StrangeShearElementCount(count) => {
                 write!(formatter, "{count} is a strange number of shear elements")
             }
@@ -99,6 +101,72 @@ pub fn compose_linear_matrix(
     let full_shear = embed_in_identity_matrix(&shear_matrix, ndim)?;
 
     Ok(mat_mul(&mat_mul(&full_rotate, &full_shear), &full_scale))
+}
+
+pub fn decompose_linear_matrix(
+    matrix: &Matrix,
+    upper_triangular: bool,
+) -> Result<(Matrix, Vec<f64>, ShearInput), TransformUtilsError> {
+    validate_square(matrix)?;
+    let n = matrix.len();
+    let (mut rotate, mut tri) = if upper_triangular {
+        qr(matrix)?
+    } else {
+        let transposed = transpose(matrix);
+        let (upper_tri, rotate) = rq(&transposed)?;
+        (transpose(&rotate), transpose(&upper_tri))
+    };
+
+    let mut scale_with_sign = vec![0.0; n];
+    for index in 0..n {
+        scale_with_sign[index] = tri[index][index];
+    }
+    let scale = scale_with_sign
+        .iter()
+        .map(|value| value.abs())
+        .collect::<Vec<_>>();
+    let mut normalize = vec![1.0; n];
+    for index in 0..n {
+        let denom = scale_with_sign[index];
+        if denom != 0.0 {
+            normalize[index] = scale[index] / denom;
+        }
+    }
+
+    for ((tri_row, rotate_row), &row_normalize) in
+        tri.iter_mut().zip(rotate.iter_mut()).zip(&normalize)
+    {
+        for value in tri_row.iter_mut().take(n) {
+            *value *= row_normalize;
+        }
+        for value in rotate_row.iter_mut().take(n) {
+            *value *= row_normalize;
+        }
+    }
+
+    for tri_row in tri.iter_mut().take(n) {
+        for (col, value) in tri_row.iter_mut().enumerate().take(n) {
+            if scale[col] == 0.0 {
+                *value = 0.0;
+            } else {
+                *value /= scale[col];
+            }
+        }
+    }
+
+    let shear = if upper_triangular {
+        let mut shear = Vec::new();
+        for (row, tri_row) in tri.iter().enumerate().take(n) {
+            for &value in tri_row.iter().take(n).skip(row + 1) {
+                shear.push(value);
+            }
+        }
+        ShearInput::Vector(shear)
+    } else {
+        ShearInput::Matrix(tri)
+    };
+
+    Ok((rotate, scale, shear))
 }
 
 pub fn infer_ndim(
@@ -232,6 +300,148 @@ pub fn mat_mul(left: &Matrix, right: &Matrix) -> Matrix {
         }
     }
     result
+}
+
+fn transpose(matrix: &Matrix) -> Matrix {
+    if matrix.is_empty() {
+        return vec![];
+    }
+    let mut output = vec![vec![0.0; matrix.len()]; matrix[0].len()];
+    for (row, values) in matrix.iter().enumerate() {
+        for (col, value) in values.iter().enumerate() {
+            output[col][row] = *value;
+        }
+    }
+    output
+}
+
+fn qr(matrix: &Matrix) -> Result<(Matrix, Matrix), TransformUtilsError> {
+    validate_square(matrix)?;
+    let n = matrix.len();
+
+    let mut q = identity(n);
+    let mut r = vec![vec![0.0; n]; n];
+    let columns: Vec<Vec<f64>> = (0..n)
+        .map(|col| (0..n).map(|row| matrix[row][col]).collect())
+        .collect();
+
+    for j in 0..n {
+        let mut v = columns[j].clone();
+        for i in 0..j {
+            let qi: Vec<f64> = (0..n).map(|row| q[row][i]).collect();
+            let projection = dot(&qi, &v);
+            r[i][j] = projection;
+            for row in 0..n {
+                v[row] -= projection * qi[row];
+            }
+        }
+
+        let norm = l2_norm(&v);
+        if norm.abs() < 1e-12 {
+            r[j][j] = 0.0;
+            continue;
+        }
+        r[j][j] = norm;
+        for row in 0..n {
+            q[row][j] = v[row] / norm;
+        }
+    }
+
+    Ok((q, r))
+}
+
+fn rq(matrix: &Matrix) -> Result<(Matrix, Matrix), TransformUtilsError> {
+    validate_square(matrix)?;
+    let reversed = reverse_rows_cols(&transpose(matrix));
+    let (q, r) = qr(&reversed)?;
+    Ok((
+        reverse_rows_cols(&transpose(&r)),
+        reverse_rows_cols(&transpose(&q)),
+    ))
+}
+
+fn reverse_rows_cols(matrix: &Matrix) -> Matrix {
+    matrix
+        .iter()
+        .rev()
+        .map(|row| row.iter().rev().copied().collect())
+        .collect()
+}
+
+fn dot(left: &[f64], right: &[f64]) -> f64 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
+fn l2_norm(vector: &[f64]) -> f64 {
+    vector.iter().map(|value| value * value).sum::<f64>().sqrt()
+}
+
+pub fn mat_vec_mul(matrix: &Matrix, vector: &[f64]) -> Vec<f64> {
+    matrix
+        .iter()
+        .map(|row| row.iter().zip(vector.iter()).map(|(a, b)| a * b).sum())
+        .collect()
+}
+
+pub fn invert_matrix(matrix: &Matrix) -> Result<Matrix, TransformUtilsError> {
+    validate_square(matrix)?;
+    let size = matrix.len();
+    if size == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut workspace = vec![vec![0.0; size * 2]; size];
+    for (row_index, row) in matrix.iter().enumerate() {
+        workspace[row_index][..size].copy_from_slice(row);
+        workspace[row_index][size + row_index] = 1.0;
+    }
+
+    for pivot in 0..size {
+        let mut swap_index = pivot;
+        while swap_index < size && workspace[swap_index][pivot].abs() < 1e-12 {
+            swap_index += 1;
+        }
+        if swap_index == size {
+            return Err(TransformUtilsError::SingularMatrix);
+        }
+        if swap_index != pivot {
+            workspace.swap(pivot, swap_index);
+        }
+
+        let pivot_value = workspace[pivot][pivot];
+        if pivot_value.abs() < 1e-12 {
+            return Err(TransformUtilsError::SingularMatrix);
+        }
+        for value in workspace[pivot].iter_mut() {
+            *value /= pivot_value;
+        }
+
+        for row_index in 0..size {
+            if row_index == pivot {
+                continue;
+            }
+            let factor = workspace[row_index][pivot];
+            if factor == 0.0 {
+                continue;
+            }
+            let pivot_values = workspace[pivot][pivot..(size * 2)].to_vec();
+            for (value, pivot_value) in workspace[row_index][pivot..(size * 2)]
+                .iter_mut()
+                .zip(pivot_values)
+            {
+                *value -= factor * pivot_value;
+            }
+        }
+    }
+
+    let mut inverse = vec![vec![0.0; size]; size];
+    for row in 0..size {
+        inverse[row][..].copy_from_slice(&workspace[row][size..]);
+    }
+    Ok(inverse)
 }
 
 fn make_rotate_matrix(rotate: RotationInput) -> Matrix {

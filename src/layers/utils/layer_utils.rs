@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::utils::dtype::DType;
+use crate::utils::transforms::affine::Affine;
+use crate::utils::transforms::transform_utils::{Matrix, identity};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PropertyValue {
@@ -30,10 +32,15 @@ pub enum LayerUtilsError {
         expected: usize,
         found: usize,
     },
+    InvalidExtentRows {
+        rows: usize,
+    },
+    MismatchedExtentDimensions,
     MultiscaleDimensionMismatch {
         expected: usize,
         found: usize,
     },
+    UnrecognizedAffineInput,
     ZeroDownsampleFactor,
 }
 
@@ -60,9 +67,18 @@ impl fmt::Display for LayerUtilsError {
                 formatter,
                 "property {key:?} should have length {expected}, got {found}"
             ),
+            Self::InvalidExtentRows { rows } => {
+                write!(formatter, "data extent must have two rows, got {rows}")
+            }
+            Self::MismatchedExtentDimensions => {
+                formatter.write_str("data extent rows must have matching dimensionality")
+            }
             Self::MultiscaleDimensionMismatch { expected, found } => write!(
                 formatter,
                 "multiscale inputs must have dimension {expected}, got {found}"
+            ),
+            Self::UnrecognizedAffineInput => formatter.write_str(
+                "affine input not recognized. must be either napari.utils.transforms.Affine or ndarray",
             ),
             Self::ZeroDownsampleFactor => formatter.write_str("downsample factors cannot be zero"),
         }
@@ -241,6 +257,68 @@ pub fn unique_element<T: PartialEq + Clone>(values: &[T]) -> Option<T> {
     } else {
         Some(first.clone())
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AffineInput {
+    None,
+    Matrix(Matrix),
+    Affine(Affine),
+    Invalid,
+}
+
+pub fn coerce_affine(
+    affine: AffineInput,
+    ndim: usize,
+    name: Option<String>,
+) -> Result<Affine, LayerUtilsError> {
+    let mut affine = match affine {
+        AffineInput::None => Affine::from_affine_matrix(identity(ndim + 1), None),
+        AffineInput::Matrix(matrix) => Affine::from_affine_matrix_with_ndim(matrix, ndim, None),
+        AffineInput::Affine(affine) => affine,
+        AffineInput::Invalid => return Err(LayerUtilsError::UnrecognizedAffineInput),
+    };
+    if name.is_some() {
+        affine.name = name;
+    }
+    Ok(affine)
+}
+
+pub fn get_extent_world(
+    data_extent: &[Vec<f64>],
+    data_to_world: &Affine,
+) -> Result<Vec<Vec<f64>>, LayerUtilsError> {
+    if data_extent.len() != 2 {
+        return Err(LayerUtilsError::InvalidExtentRows {
+            rows: data_extent.len(),
+        });
+    }
+    if data_extent[0].len() != data_extent[1].len() {
+        return Err(LayerUtilsError::MismatchedExtentDimensions);
+    }
+
+    let ndim = data_extent[0].len();
+    let mut corners = Vec::with_capacity(usize::pow(2, ndim as u32));
+    for mask in 0..usize::pow(2, ndim as u32) {
+        let mut corner = Vec::with_capacity(ndim);
+        for (axis, (&low, &high)) in data_extent[0].iter().zip(&data_extent[1]).enumerate() {
+            let value = if ((mask >> axis) & 1) == 0 { low } else { high };
+            corner.push(value);
+        }
+        corners.push(corner);
+    }
+
+    let world_corners = data_to_world.transform_points(&corners);
+    let mut min_corner = vec![f64::INFINITY; ndim];
+    let mut max_corner = vec![f64::NEG_INFINITY; ndim];
+    for corner in world_corners {
+        for (axis, value) in corner.into_iter().enumerate() {
+            min_corner[axis] = min_corner[axis].min(value);
+            max_corner[axis] = max_corner[axis].max(value);
+        }
+    }
+
+    Ok(vec![min_corner, max_corner])
 }
 
 pub fn dims_displayed_world_to_layer(

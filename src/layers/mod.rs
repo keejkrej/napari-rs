@@ -1,10 +1,14 @@
 pub mod base;
+pub mod data_protocols;
 pub mod image;
+pub mod intensity;
 pub mod labels;
 pub mod multiscale_data;
 pub mod points;
+pub mod scalar_field;
 pub mod shapes;
 pub mod source;
 pub mod surface;
+pub mod tracks;
 pub mod utils;
 pub mod vectors;

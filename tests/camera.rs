@@ -1,4 +1,4 @@
-use napari_rs::components::camera::{Camera, DisplayDimensions};
+use napari_rs::components::camera::{Camera, CameraError, DisplayDimensions};
 use napari_rs::utils::camera_orientations::{
     DEFAULT_ORIENTATION, DEFAULT_ORIENTATION_STR, DepthAxisOrientation, Handedness,
     HorizontalAxisOrientation, VerticalAxisOrientation,
@@ -101,6 +101,43 @@ fn calculate_nd_view_direction_matches_python_cases() {
     assert_close(view_direction[0], -1.0);
     assert_close(view_direction[2], 0.0);
     assert_close(view_direction[4], 0.0);
+}
+
+#[test]
+fn set_view_direction_matches_python_camera_angles_for_axis_direction() {
+    let mut camera = Camera::default();
+    camera.set_view_direction([1.0, 0.0, 0.0], None).unwrap();
+
+    assert_vec3_close(camera.view_direction(), [1.0, 0.0, 0.0]);
+    assert_vec3_close(normalize_angles(camera.angles), [-180.0, 0.0, -180.0]);
+}
+
+#[test]
+fn set_view_direction_matches_python_camera_angles_for_general_direction() {
+    let norm = (1.0_f64 + 4.0 + 9.0).sqrt();
+    let view_direction = [1.0 / norm, 2.0 / norm, 3.0 / norm];
+    let mut camera = Camera::default();
+    camera.set_view_direction(view_direction, None).unwrap();
+
+    assert_vec3_near(camera.view_direction(), view_direction, 1e-10);
+    assert_vec3_near(
+        normalize_angles(camera.angles),
+        [-180.0, -71.6, -147.7],
+        0.1,
+    );
+}
+
+#[test]
+fn set_view_direction_rejects_zero_or_parallel_direction_inputs() {
+    let mut camera = Camera::default();
+    assert_eq!(
+        camera.set_view_direction([0.0, 0.0, 0.0], None),
+        Err(CameraError::ZeroViewDirection)
+    );
+    assert_eq!(
+        camera.set_view_direction([0.0, -1.0, 0.0], None),
+        Err(CameraError::ParallelUpDirection)
+    );
 }
 
 #[test]
@@ -250,4 +287,14 @@ fn assert_vec3_near(actual: [f64; 3], expected: [f64; 3], tolerance: f64) {
             "expected {expected}, got {actual}"
         );
     }
+}
+
+fn normalize_angles(angles: [f64; 3]) -> [f64; 3] {
+    angles.map(|angle| {
+        let mut normalized = (angle + 180.0).rem_euclid(360.0) - 180.0;
+        if (normalized + 180.0).abs() <= EPS {
+            normalized = -180.0;
+        }
+        normalized
+    })
 }

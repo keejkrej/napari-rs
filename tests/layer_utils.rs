@@ -1,18 +1,33 @@
 use std::collections::BTreeMap;
 
 use napari_rs::layers::utils::layer_utils::{
-    LayerUtilsError, Properties, PropertyValue, calc_data_range, coerce_current_properties,
-    compute_multiscale_level, compute_multiscale_level_and_corners, dims_displayed_world_to_layer,
-    get_current_properties, nanmax, nanmin, segment_normal, unique_element, validate_properties,
-    validate_property_choices,
+    AffineInput, LayerUtilsError, Properties, PropertyValue, calc_data_range, coerce_affine,
+    coerce_current_properties, compute_multiscale_level, compute_multiscale_level_and_corners,
+    dims_displayed_world_to_layer, get_current_properties, get_extent_world, nanmax, nanmin,
+    segment_normal, unique_element, validate_properties, validate_property_choices,
 };
 use napari_rs::utils::dtype::DType;
+use napari_rs::utils::transforms::affine::Affine;
+use napari_rs::utils::transforms::transform_utils::RotationInput;
 
 fn properties(entries: impl IntoIterator<Item = (&'static str, Vec<PropertyValue>)>) -> Properties {
     entries
         .into_iter()
         .map(|(key, values)| (key.to_owned(), values))
         .collect::<BTreeMap<_, _>>()
+}
+
+fn assert_matrix_close(actual: &[Vec<f64>], expected: &[Vec<f64>]) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual_row, expected_row) in actual.iter().zip(expected) {
+        assert_eq!(actual_row.len(), expected_row.len());
+        for (&actual, &expected) in actual_row.iter().zip(expected_row) {
+            assert!(
+                (actual - expected).abs() <= 1e-10,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -244,6 +259,117 @@ fn unique_element_matches_python_helper_for_scalar_and_nested_values() {
     assert_eq!(unique_element(&["sky", "sky"]), Some("sky"));
     assert_eq!(unique_element(&[vec![1, 2], vec![1, 2]]), Some(vec![1, 2]));
     assert_eq!(unique_element(&[vec![1, 2], vec![2, 1]]), None);
+}
+
+#[test]
+fn coerce_affine_defaults_none_to_identity_with_requested_dimensionality() {
+    let affine = coerce_affine(AffineInput::None, 3, Some("data2world".to_owned())).unwrap();
+
+    assert_eq!(affine.name.as_deref(), Some("data2world"));
+    assert_eq!(affine.ndim(), 3);
+    assert_eq!(
+        affine.affine_matrix(),
+        vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        ]
+    );
+}
+
+#[test]
+fn coerce_affine_embeds_array_matrices_and_renames_existing_affines() {
+    let matrix = vec![
+        vec![2.0, 0.0, 10.0],
+        vec![0.0, 3.0, 20.0],
+        vec![0.0, 0.0, 1.0],
+    ];
+    let affine = coerce_affine(AffineInput::Matrix(matrix), 3, None).unwrap();
+
+    assert_eq!(affine.ndim(), 3);
+    assert_eq!(
+        affine.affine_matrix(),
+        vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 2.0, 0.0, 10.0],
+            vec![0.0, 0.0, 3.0, 20.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        ]
+    );
+
+    let existing = Affine::new(
+        vec![2.0, 3.0],
+        vec![1.0, -1.0],
+        None,
+        None,
+        None,
+        None,
+        Some(2),
+        Some("old".to_owned()),
+    );
+    let renamed = coerce_affine(AffineInput::Affine(existing), 7, Some("new".to_owned())).unwrap();
+    assert_eq!(renamed.ndim(), 2);
+    assert_eq!(renamed.name.as_deref(), Some("new"));
+}
+
+#[test]
+fn coerce_affine_rejects_unrecognized_inputs_like_python_helper() {
+    assert_eq!(
+        coerce_affine(AffineInput::Invalid, 2, None),
+        Err(LayerUtilsError::UnrecognizedAffineInput)
+    );
+}
+
+#[test]
+fn get_extent_world_transforms_all_data_extent_corners_like_python_helper() {
+    let affine = Affine::new(
+        vec![2.0, 3.0],
+        vec![10.0, -5.0],
+        None,
+        None,
+        None,
+        None,
+        Some(2),
+        None,
+    );
+    let extent = get_extent_world(&[vec![1.0, 2.0], vec![4.0, 6.0]], &affine).unwrap();
+
+    assert_matrix_close(&extent, &[vec![12.0, 1.0], vec![18.0, 13.0]]);
+}
+
+#[test]
+fn get_extent_world_uses_full_corner_mesh_for_rotated_or_sheared_extents() {
+    let affine = Affine::new(
+        vec![1.0, 1.0],
+        vec![0.0, 0.0],
+        None,
+        None,
+        Some(RotationInput::Angle2D(90.0)),
+        None,
+        Some(2),
+        None,
+    );
+    let rotated = get_extent_world(&[vec![1.0, 2.0], vec![4.0, 6.0]], &affine).unwrap();
+    assert_matrix_close(&rotated, &[vec![-6.0, 1.0], vec![-2.0, 4.0]]);
+
+    let shear =
+        Affine::from_linear_matrix(vec![vec![1.0, 2.0], vec![0.0, 1.0]], vec![0.0, 0.0], None);
+    let sheared = get_extent_world(&[vec![1.0, 2.0], vec![4.0, 6.0]], &shear).unwrap();
+    assert_matrix_close(&sheared, &[vec![5.0, 2.0], vec![16.0, 6.0]]);
+}
+
+#[test]
+fn get_extent_world_validates_data_extent_shape() {
+    let affine = Affine::default();
+    assert_eq!(
+        get_extent_world(&[vec![0.0, 0.0]], &affine),
+        Err(LayerUtilsError::InvalidExtentRows { rows: 1 })
+    );
+    assert_eq!(
+        get_extent_world(&[vec![0.0], vec![1.0, 2.0]], &affine),
+        Err(LayerUtilsError::MismatchedExtentDimensions)
+    );
 }
 
 #[test]

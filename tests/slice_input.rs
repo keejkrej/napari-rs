@@ -1,4 +1,8 @@
-use napari_rs::layers::utils::slice_input::{SliceInput, SliceInputError, ThickNdSlice};
+use napari_rs::layers::utils::slice_input::{
+    SliceInput, SliceInputError, ThickNdSlice, apply_units_to_transform,
+};
+use napari_rs::utils::transforms::affine::Affine;
+use napari_rs::utils::transforms::units::Unit;
 
 #[test]
 fn thick_nd_slice_make_full_fills_missing_values_and_adjusts_ndim_like_python() {
@@ -210,4 +214,140 @@ fn slice_input_orthogonality_validates_linear_matrix_shape() {
             expected: 3
         })
     );
+}
+
+#[test]
+fn slice_input_data_slice_transforms_only_not_displayed_axes() {
+    let slice_input = SliceInput {
+        ndisplay: 2,
+        world_slice: ThickNdSlice {
+            point: vec![10.0, 20.0, 30.0],
+            margin_left: vec![1.0, 2.0, 3.0],
+            margin_right: vec![4.0, 5.0, 6.0],
+        },
+        order: vec![0, 1, 2],
+    };
+    let world_to_data = Affine::new(
+        vec![2.0, 3.0, 4.0],
+        vec![100.0, 200.0, 300.0],
+        None,
+        None,
+        None,
+        None,
+        Some(3),
+        None,
+    );
+
+    let data_slice = slice_input.data_slice(&world_to_data);
+
+    assert!(data_slice.point[1].is_nan());
+    assert!(data_slice.point[2].is_nan());
+    assert!(data_slice.margin_left[1].is_nan());
+    assert!(data_slice.margin_right[2].is_nan());
+    assert_vec_close(&data_slice.point[..1], &[120.0]);
+    assert_vec_close(&data_slice.margin_left[..1], &[2.0]);
+    assert_vec_close(&data_slice.margin_right[..1], &[8.0]);
+}
+
+#[test]
+fn slice_input_data_slice_uses_axis_order_and_preserves_displayed_nans() {
+    let slice_input = SliceInput {
+        ndisplay: 1,
+        world_slice: ThickNdSlice {
+            point: vec![10.0, 20.0, 30.0],
+            margin_left: vec![1.0, f64::NAN, 3.0],
+            margin_right: vec![4.0, 5.0, f64::NAN],
+        },
+        order: vec![2, 0, 1],
+    };
+    let world_to_data = Affine::new(
+        vec![2.0, 3.0, 4.0],
+        vec![100.0, 200.0, 300.0],
+        None,
+        None,
+        None,
+        None,
+        Some(3),
+        None,
+    );
+
+    let data_slice = slice_input.data_slice(&world_to_data);
+
+    assert_vec_close(&data_slice.point, &[120.0, f64::NAN, 420.0]);
+    assert_vec_close(&data_slice.margin_left, &[2.0, f64::NAN, 12.0]);
+    assert_vec_close(&data_slice.margin_right, &[0.0, f64::NAN, 0.0]);
+}
+
+#[test]
+fn apply_units_to_transform_scales_linear_matrix_by_trailing_world_units() {
+    let mut data_to_world = Affine::new(
+        vec![2.0, 3.0],
+        vec![10.0, 20.0],
+        None,
+        None,
+        None,
+        None,
+        Some(2),
+        Some("data2world".to_owned()),
+    );
+    data_to_world
+        .set_units(vec![Unit::Millimeter, Unit::Centimeter])
+        .unwrap();
+
+    let transformed = apply_units_to_transform(
+        &data_to_world,
+        Some(&[Unit::Pixel, Unit::Meter, Unit::Millimeter]),
+    );
+
+    assert_matrix_close(
+        &transformed.linear_matrix,
+        &[vec![2_000.0, 0.0], vec![0.0, 0.3]],
+    );
+    assert_eq!(transformed.translate, vec![10.0, 20.0]);
+    assert_eq!(transformed.units, vec![Unit::Pixel, Unit::Pixel]);
+    assert_eq!(transformed.name, None);
+}
+
+#[test]
+fn apply_units_to_transform_returns_original_when_units_are_absent_or_too_short() {
+    let mut data_to_world = Affine::default();
+    data_to_world
+        .set_units(vec![Unit::Millimeter, Unit::Millimeter])
+        .unwrap();
+
+    assert_eq!(
+        apply_units_to_transform(&data_to_world, None),
+        data_to_world
+    );
+    assert_eq!(
+        apply_units_to_transform(&data_to_world, Some(&[Unit::Meter])),
+        data_to_world
+    );
+}
+
+fn assert_vec_close(actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        if expected.is_nan() {
+            assert!(actual.is_nan(), "expected NaN, got {actual}");
+        } else {
+            assert!(
+                (actual - expected).abs() <= 1e-10,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+}
+
+fn assert_matrix_close(actual: &[Vec<f64>], expected: &[Vec<f64>]) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual_row, expected_row) in actual.iter().zip(expected) {
+        assert_eq!(actual_row.len(), expected_row.len());
+        for (&actual, &expected) in actual_row.iter().zip(expected_row) {
+            assert!(
+                (actual - expected).abs() <= 1e-10,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
 }

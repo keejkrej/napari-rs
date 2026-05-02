@@ -1,8 +1,7 @@
 use napari_rs::layers::multiscale_data::ArrayMetadata;
 use napari_rs::layers::utils::stack_utils::{
-    CMYBGR, MAGENTA_GREEN, StackUtilsError, channel_blending_values,
-    default_channel_colormaps, slice_shape_from_axis, split_channel_shapes,
-    split_multiscale_channel_shapes,
+    CMYBGR, MAGENTA_GREEN, StackUtilsError, channel_blending_values, default_channel_colormaps,
+    slice_shape_from_axis, split_channel_shapes, split_multiscale_channel_shapes,
 };
 use napari_rs::utils::dtype::DType;
 

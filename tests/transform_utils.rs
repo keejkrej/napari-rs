@@ -1,8 +1,9 @@
 use napari_rs::utils::transforms::transform_utils::{
-    RotationInput, ShearInput, compose_linear_matrix, embed_in_identity_matrix,
-    expand_upper_triangular, infer_ndim, is_diagonal, is_matrix_lower_triangular,
-    is_matrix_triangular, is_matrix_upper_triangular, rotate_to_matrix, scale_to_vector,
-    shear_matrix_from_angle, shear_to_matrix, translate_to_vector,
+    RotationInput, ShearInput, compose_linear_matrix, decompose_linear_matrix,
+    embed_in_identity_matrix, expand_upper_triangular, infer_ndim, invert_matrix, is_diagonal,
+    is_matrix_lower_triangular, is_matrix_triangular, is_matrix_upper_triangular, mat_mul,
+    rotate_to_matrix, scale_to_vector, shear_matrix_from_angle, shear_to_matrix,
+    translate_to_vector,
 };
 
 const EPS: f64 = 1e-10;
@@ -55,6 +56,68 @@ fn compose_linear_matrix_preserves_python_order_rotate_shear_scale() {
     let matrix = compose_linear_matrix(rotate, &[2.0, 5.0], shear).unwrap();
 
     assert_matrix_close(&matrix, &[vec![0.0, -5.0], vec![2.0, 15.0]]);
+}
+
+#[test]
+fn decompose_linear_matrix_round_trips_upper_and_lower_triangular_styles() {
+    let matrix = vec![
+        vec![0.548_813_503_927_324_8, 0.715_189_366_372_419_5],
+        vec![0.602_763_376_071_643_9, 0.544_883_182_996_896_9],
+    ];
+
+    for upper_triangular in [true, false] {
+        let (rotate, scale, shear) = decompose_linear_matrix(&matrix, upper_triangular).unwrap();
+        let rebuilt =
+            compose_linear_matrix(RotationInput::Matrix(rotate.clone()), &scale, shear.clone())
+                .unwrap();
+        assert_matrix_close_with_tolerance(&rebuilt, &matrix, 1e-8);
+
+        let (rotate_b, scale_b, shear_b) =
+            decompose_linear_matrix(&rebuilt, upper_triangular).unwrap();
+        assert_matrix_close_with_tolerance(&rotate_b, &rotate, 1e-8);
+        assert_vec_close_with_tolerance(&scale_b, &scale, 1e-8);
+        assert_shear_close(&shear_b, &shear, 1e-8);
+    }
+}
+
+#[test]
+fn decompose_linear_matrix_matches_python_3d_rotation_scale_case() {
+    let rotate = vec![
+        vec![1.0, 0.0, 0.0],
+        vec![0.0, 0.0, -1.0],
+        vec![0.0, 1.0, 0.0],
+    ];
+    let matrix = rotate
+        .iter()
+        .map(|row| row.iter().map(|value| value * 5.0).collect())
+        .collect();
+
+    let (actual_rotate, scale, _shear) = decompose_linear_matrix(&matrix, false).unwrap();
+
+    assert_matrix_close_with_tolerance(&actual_rotate, &rotate, 1e-8);
+    assert_vec_close(&scale, &[5.0, 5.0, 5.0]);
+}
+
+#[test]
+fn invert_matrix_matches_identity_product_for_affine_matrices() {
+    let matrix = vec![
+        vec![0.2, 0.7, 3.0],
+        vec![0.6, 0.5, -2.0],
+        vec![0.0, 0.0, 1.0],
+    ];
+    let inverse = invert_matrix(&matrix).unwrap();
+    let product = mat_mul(&matrix, &inverse);
+
+    assert_matrix_close_with_tolerance(
+        &product,
+        &[
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ],
+        1e-8,
+    );
+    assert!(invert_matrix(&vec![vec![1.0, 1.0], vec![1.0, 1.0]]).is_err());
 }
 
 #[test]
@@ -126,9 +189,38 @@ fn assert_vec_close(actual: &[f64], expected: &[f64]) {
     }
 }
 
+fn assert_vec_close_with_tolerance(actual: &[f64], expected: &[f64], tolerance: f64) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected {expected}, got {actual}"
+        );
+    }
+}
+
 fn assert_matrix_close(actual: &[Vec<f64>], expected: &[Vec<f64>]) {
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {
         assert_vec_close(actual, expected);
+    }
+}
+
+fn assert_matrix_close_with_tolerance(actual: &[Vec<f64>], expected: &[Vec<f64>], tolerance: f64) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_vec_close_with_tolerance(actual, expected, tolerance);
+    }
+}
+
+fn assert_shear_close(actual: &ShearInput, expected: &ShearInput, tolerance: f64) {
+    match (actual, expected) {
+        (ShearInput::Vector(actual), ShearInput::Vector(expected)) => {
+            assert_vec_close_with_tolerance(actual, expected, tolerance);
+        }
+        (ShearInput::Matrix(actual), ShearInput::Matrix(expected)) => {
+            assert_matrix_close_with_tolerance(actual, expected, tolerance);
+        }
+        _ => panic!("expected matching shear input variants"),
     }
 }

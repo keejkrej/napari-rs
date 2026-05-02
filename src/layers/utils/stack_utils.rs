@@ -66,7 +66,10 @@ impl fmt::Display for StackUtilsError {
                 "level {level} has {actual} channels, expected {expected}"
             ),
             Self::NotEnoughDimensionsForSplit { ndim } => {
-                write!(formatter, "image needs more than 2 dimensions for splitting, got {ndim}")
+                write!(
+                    formatter,
+                    "image needs more than 2 dimensions for splitting, got {ndim}"
+                )
             }
             Self::MetadataLengthMismatch {
                 field,
@@ -205,10 +208,7 @@ pub fn channel_blending_values(n_channels: usize, blending: Option<&str>) -> Vec
         0 => Vec::new(),
         1 => vec!["translucent_no_depth".to_owned()],
         _ => std::iter::once("translucent_no_depth".to_owned())
-            .chain(std::iter::repeat_n(
-                "additive".to_owned(),
-                n_channels - 1,
-            ))
+            .chain(std::iter::repeat_n("additive".to_owned(), n_channels - 1))
             .collect(),
     }
 }
